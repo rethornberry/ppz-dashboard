@@ -27,12 +27,12 @@ TRG_COLORS = {
 JZ_COLORS = {"JZ0": "#4e79a7", "JZ1": "#f28e2b", "JZ2": "#59a14f"}
 SIG_COLORS = {"HHbbyy": "darkorange", "Zee": "royalblue", "Hyy": "maroon"}
 
-PT_BINS    = np.array([15, 20, 30, 40, 50, 75, 100, 150, 200])
+PT_BINS     = np.array([15, 16, 17, 18, 20, 22, 25, 27, 30, 40, 50, 75, 100, 150, 200])
 PT_CENTERS = 0.5 * (PT_BINS[:-1] + PT_BINS[1:])
 
 
 @st.cache_data
-def load_pkl(path: str):
+def load_pkl(path: str, _mtime: float):
     with open(path, "rb") as f:
         return pickle.load(f)
 
@@ -45,7 +45,7 @@ st.title("PPZ Photon Pointing — Trigger Rate Dashboard")
 results = None
 
 if DEFAULT_PKL.exists():
-    results = load_pkl(str(DEFAULT_PKL))
+    results = load_pkl(str(DEFAULT_PKL), DEFAULT_PKL.stat().st_mtime)
 else:
     st.info("Local results file not found. Upload a .pkl file to continue.")
     uploaded = st.file_uploader("Upload results .pkl", type=["pkl"])
@@ -203,7 +203,9 @@ elif plot_type == "Turn-on Curves":
     colors = plt.cm.viridis(np.linspace(0.1, 0.9, len(rate_points_sel)))
     for color, rp in zip(colors, rate_points_sel):
         eff = eff_vs_pt_data[rp]
-        ax.plot(PT_CENTERS, eff, "o-", label=f"{rp/1e3:.0f} kHz", color=color, lw=2)
+        n = len(eff)
+        pt_centers = 0.5 * (PT_BINS[:n] + PT_BINS[1:n+1])
+        ax.plot(pt_centers, eff, "o-", label=f"{rp/1e3:.0f} kHz", color=color, lw=2)
     ax.set_xlabel(r"Subleading truth photon $p_T$ [GeV]")
     ax.set_ylabel("Signal efficiency")
     ax.set_title(
@@ -213,7 +215,7 @@ elif plot_type == "Turn-on Curves":
     ax.legend(title="Rate operating point")
     ax.grid(True, alpha=0.3)
     ax.set_ylim(0, 1)
-    ax.set_xlim(PT_BINS[0], PT_BINS[-1])
+    ax.set_xlim(PT_BINS[0], PT_BINS[len(eff)])
 
 elif plot_type == "Rate vs Threshold":
     thresholds = results[eratio_sel][et_sel][trg_options[0]]["thresholds"]
