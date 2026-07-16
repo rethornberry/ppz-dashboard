@@ -1,0 +1,13 @@
+# Data files — too large for git, shared via CERNbox
+*.pkl
+*.npz
+*.root
+*.h5
+
+# Python
+__pycache__/
+*.pyc
+.ipynb_checkpoints/
+
+# Streamlit local cache
+.streamlit/
