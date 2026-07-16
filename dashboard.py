@@ -14,11 +14,15 @@ TRG_LABELS = {
     "single_egamma": "Single e/γ",
     "di_egamma":     "Di e/γ",
     "delta_ppz":     "ΔPPZ",
+    "combo_and":     "Di e/γ AND ΔPPZ",
+    "combo_or":      "Di e/γ OR ΔPPZ",
 }
 TRG_COLORS = {
     "single_egamma": "#1f77b4",
     "di_egamma":     "#ff7f0e",
     "delta_ppz":     "#2ca02c",
+    "combo_and":     "#9467bd",
+    "combo_or":      "#d62728",
 }
 
 PT_BINS    = np.array([15, 20, 30, 40, 50, 75, 100, 150, 200])
@@ -52,10 +56,7 @@ if results is None:
 # ── Introspect available keys ─────────────────────────────────────────────────
 eratio_options = list(results.keys())
 et_options     = list(results[eratio_options[0]].keys())
-trg_options    = [
-    t for t in results[eratio_options[0]][et_options[0]].keys()
-    if t != "combination"
-]
+trg_options = list(results[eratio_options[0]][et_options[0]].keys())
 sig_options = list(
     results[eratio_options[0]][et_options[0]][trg_options[0]]["efficiency"].keys()
 )
@@ -96,9 +97,8 @@ with st.sidebar:
             format_func=lambda x: TRG_LABELS.get(x, x),
         )
         sig_sel = st.selectbox("Signal sample", sig_options)
-        available_rate_points = sorted(
-            results[eratio_sel][et_sel][trg_sel]["eff_vs_pt"][sig_sel].keys()
-        )
+        eff_vs_pt_data = results[eratio_sel][et_sel][trg_sel].get("eff_vs_pt", {}).get(sig_sel, {})
+        available_rate_points = sorted(eff_vs_pt_data.keys())
         rate_points_sel = st.multiselect(
             "Rate operating points",
             available_rate_points,
@@ -142,8 +142,11 @@ if plot_type == "Efficiency vs Rate":
         ax.set_xlim(left=0)
 
 elif plot_type == "Turn-on Curves":
+    if not available_rate_points:
+        st.warning("No turn-on curve data in this pkl. Re-run trigger_rate.py to generate it.")
+        st.stop()
     colors = plt.cm.viridis(np.linspace(0.1, 0.9, len(rate_points_sel)))
-    eff_vs_pt_dict = results[eratio_sel][et_sel][trg_sel]["eff_vs_pt"][sig_sel]
+    eff_vs_pt_dict = eff_vs_pt_data
     for color, rp in zip(colors, rate_points_sel):
         eff = eff_vs_pt_dict[rp]
         ax.plot(PT_CENTERS, eff, "o-", label=f"{rp/1e3:.0f} kHz", color=color, lw=2)
