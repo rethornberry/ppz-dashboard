@@ -43,11 +43,15 @@ QUANTITIES = ["Threshold [mm]", "Rate [kHz]", "Signal efficiency"]
 SPLIT_DIMS = ["Trigger", "Signal", "Algorithm", "ERatio", "Min ET [GeV]"]
 PREMADE_PLOTS = [
     "Efficiency vs Rate",
+    "ROC Curve",
     "Rate by JZ Slice",
     "Turn-on Curves",
     "Rate vs Threshold",
     "3D Surface (Combo)",
+    "2D Heatmap (Combo)",
 ]
+
+TOTAL_INPUT_RATE = 30.92e6 + 30.91e6 + 1.84e6  # Hz
 
 
 @st.cache_data
@@ -127,6 +131,16 @@ with st.sidebar:
             rate_budget        = st.number_input("Di/ΔPPZ budget [kHz]", value=60.0,  step=10.0) if show_budget else None
             show_budget_single = "single_egamma" in trg_sel_multi and st.checkbox("Show Single e/γ rate budget", value=True)
             rate_budget_single = st.number_input("Single e/γ budget [kHz]", value=200.0, step=10.0) if show_budget_single else None
+
+        elif plot_type == "ROC Curve":
+            trg_sel_multi = st.multiselect(
+                "Trigger types", trg_options, default=trg_options,
+                format_func=lambda x: TRG_LABELS.get(x, x),
+            )
+            sig_sel  = st.selectbox("Signal sample", sig_options)
+            x_mode   = st.radio("X axis", ["Background efficiency", "Background rejection (1−ε)", "Rejection factor (1/ε)"])
+            log_x_roc = st.checkbox("Log x-axis", value=(x_mode == "Rejection factor (1/ε)"))
+            show_auc  = st.checkbox("Show AUC in legend", value=True)
 
         elif plot_type == "Rate by JZ Slice":
             trg_sel = st.selectbox(
@@ -213,6 +227,18 @@ with st.sidebar:
             if z_sel == "Signal efficiency":
                 sig_sel = st.selectbox("Signal sample", sig_options)
             log_z = st.checkbox("Log z-axis", value=False)
+
+        elif plot_type == "2D Heatmap (Combo)":
+            trg_sel = st.selectbox(
+                "Combo trigger", combo_options,
+                format_func=lambda x: TRG_LABELS.get(x, x),
+            )
+            sig_sel = st.selectbox("Signal sample", sig_options)
+            rate_contours = st.multiselect(
+                "Rate contours [kHz]", [10, 20, 30, 60, 100, 200],
+                default=[30, 60, 100],
+            )
+            highlight_contour = st.number_input("Highlight contour [kHz]", value=60, step=10)
 
 
 # ── Documentation page ───────────────────────────────────────────────────────
@@ -352,6 +378,78 @@ if plot_type == "3D Surface (Combo)":
     )
     st.plotly_chart(fig3d, use_container_width=True)
 
+elif plot_type == "2D Heatmap (Combo)":
+    trg_data = results[eratio_sel][et_sel][alg_sel][trg_sel]
+    ppz_t    = trg_data["ppz_thresholds"]
+    delta_t  = trg_data["delta_thresholds"]
+
+    if ppz_t is None:
+        st.warning("No 2D data in this pkl. Re-run trigger_rate.py with the 2D grid code.")
+        st.stop()
+
+    eff_2d  = trg_data["efficiency_2d"][sig_sel]
+    rate_2d = trg_data["rate_2d"] / 1e3  # kHz
+
+    # find optimal point inside highlight contour
+    feasible = rate_2d <= highlight_contour
+    if np.any(feasible):
+        masked = np.where(feasible, eff_2d, -1)
+        oi, oj = np.unravel_index(np.argmax(masked), masked.shape)
+        opt_t   = ppz_t[oi]
+        opt_dt  = delta_t[oj]
+        opt_eff = eff_2d[oi, oj]
+        opt_rate = rate_2d[oi, oj]
+    else:
+        oi, oj = None, None
+
+    fig2d = go.Figure()
+
+    # efficiency heatmap
+    fig2d.add_trace(go.Heatmap(
+        x=ppz_t, y=delta_t, z=eff_2d.T,
+        colorscale="Viridis",
+        colorbar=dict(title=f"Signal efficiency ({sig_sel})"),
+        hovertemplate="t: %{x:.0f} mm<br>t': %{y:.0f} mm<br>Efficiency: %{z:.3f}<extra></extra>",
+        zmin=0, zmax=1,
+    ))
+
+    # rate contour lines — no legend entries, labels drawn on the lines
+    contour_colors = {c: ("red" if c == highlight_contour else "white") for c in rate_contours}
+    contour_widths = {c: (3   if c == highlight_contour else 1)         for c in rate_contours}
+    for level in sorted(rate_contours):
+        fig2d.add_trace(go.Contour(
+            x=ppz_t, y=delta_t, z=rate_2d.T,
+            contours=dict(
+                type="constraint", operation="=", value=level,
+                showlabels=True,
+                labelfont=dict(size=11, color=contour_colors[level]),
+            ),
+            line=dict(color=contour_colors[level], width=contour_widths[level]),
+            showscale=False,
+            showlegend=False,
+            hoverinfo="skip",
+        ))
+
+    # optimal point marker
+    if oi is not None:
+        fig2d.add_trace(go.Scatter(
+            x=[opt_t], y=[opt_dt], mode="markers",
+            marker=dict(symbol="star", size=16, color="red", line=dict(color="white", width=1)),
+            showlegend=False,
+            hovertemplate=f"<b>Optimum</b><br>t={opt_t:.0f} mm<br>t'={opt_dt:.0f} mm<br>Efficiency: {opt_eff:.3f}<br>Rate: {opt_rate:.1f} kHz<extra></extra>",
+        ))
+
+    fig2d.update_layout(
+        title=f"{TRG_LABELS.get(trg_sel)}   |   {ALG_LABELS.get(alg_sel, alg_sel)}   |   ERatio: {ERATIO_LABELS.get(eratio_sel)}   |   Min ET: {et_sel} GeV",
+        xaxis_title="PPZ threshold t [mm]",
+        yaxis_title="ΔPPZ threshold t' [mm]",
+        height=600,
+        showlegend=False,
+    )
+    st.plotly_chart(fig2d, use_container_width=True)
+    if oi is not None:
+        st.info(f"★ Optimal point within {highlight_contour} kHz budget: t = {opt_t:.0f} mm, t' = {opt_dt:.0f} mm → efficiency = {opt_eff:.3f}, rate = {opt_rate:.1f} kHz")
+
 else:
     fig   = go.Figure()
     r     = results[eratio_sel][et_sel][alg_sel]
@@ -426,6 +524,38 @@ else:
         xaxis = dict(title="Subleading truth photon pT [GeV]", range=[PT_BINS[0], PT_BINS[n]])
         yaxis = dict(title="Signal efficiency", range=[0, 1])
         title = f"{sig_sel}   |   {TRG_LABELS.get(trg_sel)}   |   {title}"
+
+    elif plot_type == "ROC Curve":
+        for trg in trg_sel_multi:
+            rate = r[trg]["rate"]
+            eff  = r[trg]["efficiency"][sig_sel]
+            bkg_eff = rate / TOTAL_INPUT_RATE
+            if x_mode == "Background rejection (1−ε)":
+                x_vals = 1.0 - bkg_eff
+                xlabel = "Background rejection (1−ε_bkg)"
+                hover_x = "Bkg rejection: %{x:.4f}"
+            elif x_mode == "Rejection factor (1/ε)":
+                x_vals = np.where(bkg_eff > 0, 1.0 / bkg_eff, np.nan)
+                xlabel = "Rejection factor (1/ε_bkg)"
+                hover_x = "Rejection factor: %{x:.0f}"
+            else:
+                x_vals = bkg_eff
+                xlabel = "Background efficiency"
+                hover_x = "Bkg eff: %{x:.4f}"
+            auc = np.trapz(eff, bkg_eff)
+            name = TRG_LABELS.get(trg, trg)
+            if show_auc:
+                name += f"  (AUC={auc:.4f})"
+            fig.add_trace(go.Scatter(
+                x=x_vals, y=eff, mode="lines",
+                name=name,
+                line=dict(color=TRG_COLORS.get(trg), width=2),
+                customdata=np.stack([rate / 1e3, r[trg]["thresholds"], bkg_eff], axis=1),
+                hovertemplate=hover_x + "<br>Sig eff: %{y:.3f}<br>Rate: %{customdata[0]:.1f} kHz<br>Threshold: %{customdata[1]:.0f} mm<extra></extra>",
+            ))
+        xaxis = dict(title=xlabel, type="log" if log_x_roc else "linear")
+        yaxis = dict(title="Signal efficiency", range=[0, 1])
+        title = f"{sig_sel}   |   {title}"
 
     elif plot_type == "Rate vs Threshold":
         thresholds = r[trg_options[0]]["thresholds"]
