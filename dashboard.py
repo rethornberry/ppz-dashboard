@@ -7,9 +7,7 @@ import numpy as np
 import streamlit as st
 
 # ── Default pkl path (works when running locally) ────────────────────────────
-DEFAULT_PKL = Path(
-    "/Users/rthornber/cernbox/photon-pointing/photonpointing/PPZ_studies/rates/rates_maxPPZ3000mm.pkl"
-)
+DEFAULT_PKL = Path(__file__).parent / "rates_maxPPZ3000mm.pkl"
 
 ERATIO_LABELS = {None: "No ERatio", "TomasOptimal": "Tomas Optimal"}
 TRG_LABELS = {
