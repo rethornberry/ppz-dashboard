@@ -24,6 +24,8 @@ TRG_COLORS = {
     "combo_and":     "#9467bd",
     "combo_or":      "#d62728",
 }
+JZ_COLORS = {"JZ0": "#4e79a7", "JZ1": "#f28e2b", "JZ2": "#59a14f"}
+SIG_COLORS = {"HHbbyy": "darkorange", "Zee": "royalblue", "Hyy": "maroon"}
 
 PT_BINS    = np.array([15, 20, 30, 40, 50, 75, 100, 150, 200])
 PT_CENTERS = 0.5 * (PT_BINS[:-1] + PT_BINS[1:])
@@ -56,9 +58,12 @@ if results is None:
 # ── Introspect available keys ─────────────────────────────────────────────────
 eratio_options = list(results.keys())
 et_options     = list(results[eratio_options[0]].keys())
-trg_options = list(results[eratio_options[0]][et_options[0]].keys())
-sig_options = list(
+trg_options    = list(results[eratio_options[0]][et_options[0]].keys())
+sig_options    = list(
     results[eratio_options[0]][et_options[0]][trg_options[0]]["efficiency"].keys()
+)
+jz_options = list(
+    results[eratio_options[0]][et_options[0]][trg_options[0]]["rate_per_slice"].keys()
 )
 
 # ── Sidebar controls ──────────────────────────────────────────────────────────
@@ -73,44 +78,63 @@ with st.sidebar:
     et_sel = st.selectbox("Min TOB ET [GeV]", et_options)
     plot_type = st.radio(
         "Plot type",
-        ["Efficiency vs Rate", "Turn-on Curves", "Rate vs Threshold"],
+        [
+            "Efficiency vs Rate",
+            "Signal Comparison",
+            "Rate by JZ Slice",
+            "Turn-on Curves",
+            "Rate vs Threshold",
+        ],
     )
 
     st.divider()
 
     if plot_type == "Efficiency vs Rate":
         trg_sel_multi = st.multiselect(
-            "Trigger types",
-            trg_options,
-            default=trg_options,
+            "Trigger types", trg_options, default=trg_options,
             format_func=lambda x: TRG_LABELS.get(x, x),
         )
         sig_sel = st.selectbox("Signal sample", sig_options)
-        rate_budget        = st.number_input("Di/ΔPPZ rate budget [kHz]", value=60.0, step=10.0)
+        rate_budget        = st.number_input("Di/ΔPPZ rate budget [kHz]", value=60.0,  step=10.0)
         rate_budget_single = st.number_input("Single e/γ budget [kHz]",   value=200.0, step=10.0)
         log_x = st.checkbox("Log x-axis (rate)", value=False)
 
+    elif plot_type == "Signal Comparison":
+        trg_sel = st.selectbox(
+            "Trigger type", trg_options,
+            format_func=lambda x: TRG_LABELS.get(x, x),
+        )
+        sig_sel_multi = st.multiselect(
+            "Signal samples", sig_options, default=sig_options,
+        )
+        rate_budget        = st.number_input("Di/ΔPPZ rate budget [kHz]", value=60.0,  step=10.0)
+        rate_budget_single = st.number_input("Single e/γ budget [kHz]",   value=200.0, step=10.0)
+        log_x = st.checkbox("Log x-axis (rate)", value=False)
+
+    elif plot_type == "Rate by JZ Slice":
+        trg_sel = st.selectbox(
+            "Trigger type", trg_options,
+            format_func=lambda x: TRG_LABELS.get(x, x),
+        )
+        stack = st.checkbox("Stacked area", value=True)
+        log_y = st.checkbox("Log y-axis", value=False)
+
     elif plot_type == "Turn-on Curves":
         trg_sel = st.selectbox(
-            "Trigger type",
-            trg_options,
+            "Trigger type", trg_options,
             format_func=lambda x: TRG_LABELS.get(x, x),
         )
         sig_sel = st.selectbox("Signal sample", sig_options)
         eff_vs_pt_data = results[eratio_sel][et_sel][trg_sel].get("eff_vs_pt", {}).get(sig_sel, {})
         available_rate_points = sorted(eff_vs_pt_data.keys())
         rate_points_sel = st.multiselect(
-            "Rate operating points",
-            available_rate_points,
-            default=available_rate_points,
+            "Rate operating points", available_rate_points, default=available_rate_points,
             format_func=lambda x: f"{x/1e3:.0f} kHz",
         )
 
     elif plot_type == "Rate vs Threshold":
         trg_sel_multi = st.multiselect(
-            "Trigger types",
-            trg_options,
-            default=trg_options,
+            "Trigger types", trg_options, default=trg_options,
             format_func=lambda x: TRG_LABELS.get(x, x),
         )
         log_y = st.checkbox("Log y-axis (rate)", value=False)
@@ -124,34 +148,63 @@ if plot_type == "Efficiency vs Rate":
         rate = results[eratio_sel][et_sel][trg]["rate"] / 1e3
         eff  = results[eratio_sel][et_sel][trg]["efficiency"][sig_sel]
         ax.plot(rate, eff, label=TRG_LABELS.get(trg, trg), color=TRG_COLORS.get(trg), lw=2)
-
     ax.axvline(rate_budget,        color="red",    ls="--", lw=1.5, label=f"{rate_budget:.0f} kHz (di/ΔPPZ)")
     ax.axvline(rate_budget_single, color="orange", ls="--", lw=1.5, label=f"{rate_budget_single:.0f} kHz (single)")
-
     ax.set_xlabel("Trigger rate [kHz]")
     ax.set_ylabel("Signal efficiency")
-    ax.set_title(
-        f"{sig_sel}   |   ERatio: {ERATIO_LABELS.get(eratio_sel)}   |   Min ET: {et_sel} GeV"
-    )
+    ax.set_title(f"{sig_sel}   |   ERatio: {ERATIO_LABELS.get(eratio_sel)}   |   Min ET: {et_sel} GeV")
     ax.legend()
     ax.grid(True, alpha=0.3)
     ax.set_ylim(0, 1)
-    if log_x:
-        ax.set_xscale("log")
+    ax.set_xscale("log") if log_x else ax.set_xlim(left=0)
+
+elif plot_type == "Signal Comparison":
+    for sig in sig_sel_multi:
+        rate = results[eratio_sel][et_sel][trg_sel]["rate"] / 1e3
+        eff  = results[eratio_sel][et_sel][trg_sel]["efficiency"][sig]
+        ax.plot(rate, eff, label=sig, color=SIG_COLORS.get(sig), lw=2)
+    budget = rate_budget_single if trg_sel == "single_egamma" else rate_budget
+    ax.axvline(budget, color="red", ls="--", lw=1.5, label=f"{budget:.0f} kHz budget")
+    ax.set_xlabel("Trigger rate [kHz]")
+    ax.set_ylabel("Signal efficiency")
+    ax.set_title(f"{TRG_LABELS.get(trg_sel)}   |   ERatio: {ERATIO_LABELS.get(eratio_sel)}   |   Min ET: {et_sel} GeV")
+    ax.legend()
+    ax.grid(True, alpha=0.3)
+    ax.set_ylim(0, 1)
+    ax.set_xscale("log") if log_x else ax.set_xlim(left=0)
+
+elif plot_type == "Rate by JZ Slice":
+    thresholds = results[eratio_sel][et_sel][trg_sel]["thresholds"]
+    slices = {jz: results[eratio_sel][et_sel][trg_sel]["rate_per_slice"][jz] / 1e3
+              for jz in jz_options}
+    if stack:
+        ax.stackplot(thresholds,
+                     [slices[jz] for jz in jz_options],
+                     labels=jz_options,
+                     colors=[JZ_COLORS.get(jz, f"C{i}") for i, jz in enumerate(jz_options)],
+                     alpha=0.8)
     else:
-        ax.set_xlim(left=0)
+        for jz in jz_options:
+            ax.plot(thresholds, slices[jz], label=jz, color=JZ_COLORS.get(jz), lw=2)
+        total = results[eratio_sel][et_sel][trg_sel]["rate"] / 1e3
+        ax.plot(thresholds, total, "k--", lw=1.5, label="Total")
+    ax.set_xlabel("PPZ threshold [mm]")
+    ax.set_ylabel("Trigger rate [kHz]")
+    ax.set_title(f"{TRG_LABELS.get(trg_sel)}   |   ERatio: {ERATIO_LABELS.get(eratio_sel)}   |   Min ET: {et_sel} GeV")
+    ax.legend()
+    ax.grid(True, alpha=0.3)
+    if log_y:
+        ax.set_yscale("log")
 
 elif plot_type == "Turn-on Curves":
     if not available_rate_points:
         st.warning("No turn-on curve data in this pkl. Re-run trigger_rate.py to generate it.")
         st.stop()
     colors = plt.cm.viridis(np.linspace(0.1, 0.9, len(rate_points_sel)))
-    eff_vs_pt_dict = eff_vs_pt_data
     for color, rp in zip(colors, rate_points_sel):
-        eff = eff_vs_pt_dict[rp]
+        eff = eff_vs_pt_data[rp]
         ax.plot(PT_CENTERS, eff, "o-", label=f"{rp/1e3:.0f} kHz", color=color, lw=2)
-
-    ax.set_xlabel(r"Leading truth photon $p_T$ [GeV]")
+    ax.set_xlabel(r"Subleading truth photon $p_T$ [GeV]")
     ax.set_ylabel("Signal efficiency")
     ax.set_title(
         f"{sig_sel}   |   {TRG_LABELS.get(trg_sel)}   |   "
@@ -167,12 +220,9 @@ elif plot_type == "Rate vs Threshold":
     for trg in trg_sel_multi:
         rate = results[eratio_sel][et_sel][trg]["rate"] / 1e3
         ax.plot(thresholds, rate, label=TRG_LABELS.get(trg, trg), color=TRG_COLORS.get(trg), lw=2)
-
     ax.set_xlabel("PPZ threshold [mm]")
     ax.set_ylabel("Trigger rate [kHz]")
-    ax.set_title(
-        f"ERatio: {ERATIO_LABELS.get(eratio_sel)}   |   Min ET: {et_sel} GeV"
-    )
+    ax.set_title(f"ERatio: {ERATIO_LABELS.get(eratio_sel)}   |   Min ET: {et_sel} GeV")
     ax.legend()
     ax.grid(True, alpha=0.3)
     if log_y:
