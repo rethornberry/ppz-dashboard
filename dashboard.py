@@ -23,8 +23,8 @@ TRG_LABELS = {
     "single_egamma": "Single e/γ",
     "di_egamma":     "Di e/γ",
     "delta_ppz":     "ΔPPZ",
-    "combo_and":     "Di e/γ AND ΔPPZ",
-    "combo_or":      "Di e/γ OR ΔPPZ",
+    "combo_and":     "Di-e/γ AND ΔPPZ",
+    "combo_or":      "Di-e/γ OR ΔPPZ",
 }
 TRG_COLORS = {
     "single_egamma": "#1f77b4",
@@ -52,6 +52,7 @@ PREMADE_PLOTS = [
 ]
 
 TOTAL_INPUT_RATE = 30.92e6 + 30.91e6 + 1.84e6  # Hz
+JZ_INPUT_RATE = {"JZ0": 30.92e6, "JZ1": 30.91e6, "JZ2": 1.84e6}
 
 
 @st.cache_data
@@ -76,16 +77,27 @@ st.title("PPZ Photon Pointing — Trigger Rate Dashboard")
 
 # ── Load results ─────────────────────────────────────────────────────────────
 results = None
+data    = None
 
 if DEFAULT_PKL.exists():
-    results = load_pkl(str(DEFAULT_PKL), DEFAULT_PKL.stat().st_mtime)
+    data = load_pkl(str(DEFAULT_PKL), DEFAULT_PKL.stat().st_mtime)
 else:
     st.info("Local results file not found. Upload a .pkl file to continue.")
     uploaded = st.file_uploader("Upload results .pkl", type=["pkl"])
     if uploaded:
-        results = pickle.load(io.BytesIO(uploaded.read()))
+        data = pickle.load(io.BytesIO(uploaded.read()))
 
-if results is None:
+if data is not None:
+    results    = data["results"]
+    yields_bkg = data.get("yields_bkg", {})
+    yields_sig = data.get("yields_sig", {})
+    # backward compat: old pkls only stored n_raw scalars
+    if not yields_bkg and "n_raw_bkg" in data:
+        yields_bkg = {jz: {"n_raw": n} for jz, n in data["n_raw_bkg"].items()}
+    if not yields_sig and "n_raw_sig" in data:
+        yields_sig = {sig: {"n_raw": n} for sig, n in data["n_raw_sig"].items()}
+
+if data is None:
     st.stop()
 
 # ── Introspect available keys ─────────────────────────────────────────────────
@@ -99,7 +111,7 @@ combo_options  = [t for t in trg_options if t in COMBO_TRGS]
 
 # ── Sidebar controls ──────────────────────────────────────────────────────────
 with st.sidebar:
-    page = st.radio("", ["Dashboard", "Documentation"], horizontal=True)
+    page = st.radio("", ["Dashboard", "Cutflow", "Documentation"], horizontal=True)
     st.divider()
 
     if page == "Dashboard":
@@ -116,7 +128,9 @@ with st.sidebar:
             format_func=lambda x: ERATIO_LABELS.get(x, str(x)),
         )
         et_sel  = st.selectbox("Min TOB ET [GeV]", et_options)
+        default_alg = "Avg_PPZL1L2BE_5Cells"
         alg_sel = st.selectbox("PPZ algorithm", alg_options,
+                               index=alg_options.index(default_alg) if default_alg in alg_options else 0,
                                format_func=lambda x: ALG_LABELS.get(x, x))
         st.divider()
 
@@ -131,6 +145,7 @@ with st.sidebar:
             rate_budget        = st.number_input("Di/ΔPPZ budget [kHz]", value=60.0,  step=10.0) if show_budget else None
             show_budget_single = "single_egamma" in trg_sel_multi and st.checkbox("Show Single e/γ rate budget", value=True)
             rate_budget_single = st.number_input("Single e/γ budget [kHz]", value=200.0, step=10.0) if show_budget_single else None
+            show_baselines     = st.checkbox("Show no-PPZ baselines", value=True)
 
         elif plot_type == "ROC Curve":
             trg_sel_multi = st.multiselect(
@@ -169,7 +184,8 @@ with st.sidebar:
                 "Trigger types", trg_options, default=trg_options,
                 format_func=lambda x: TRG_LABELS.get(x, x),
             )
-            log_y = st.checkbox("Log y-axis (rate)", value=False)
+            log_y          = st.checkbox("Log y-axis (rate)", value=False)
+            show_baselines = st.checkbox("Show no-PPZ baselines", value=True)
 
         elif plot_type == "Explorer":
             x_qty     = st.selectbox("X axis", QUANTITIES, index=2)
@@ -240,6 +256,22 @@ with st.sidebar:
             )
             highlight_contour = st.number_input("Highlight contour [kHz]", value=60, step=10)
 
+    elif page == "Cutflow":
+        st.header("Settings")
+        cf_eratio_sel = st.selectbox(
+            "ERatio condition", eratio_options,
+            format_func=lambda x: ERATIO_LABELS.get(x, str(x)),
+            key="cf_eratio",
+        )
+        cf_et_sel = st.selectbox("Min TOB ET [GeV]", et_options, key="cf_et")
+        default_alg = "Avg_PPZL1L2BE_5Cells"
+        cf_alg_sel = st.selectbox("PPZ algorithm", alg_options,
+                                  index=alg_options.index(default_alg) if default_alg in alg_options else 0,
+                                  format_func=lambda x: ALG_LABELS.get(x, x), key="cf_alg")
+        cf_trg_sel = st.selectbox("Trigger type", trg_options,
+                                  format_func=lambda x: TRG_LABELS.get(x, x), key="cf_trg")
+        cf_rate_budget = st.number_input("PPZ trigger rate budget [kHz]", value=60.0, step=10.0, key="cf_budget")
+
 
 # ── Documentation page ───────────────────────────────────────────────────────
 
@@ -259,9 +291,9 @@ triggers at the ATLAS HL-LHC L1 trigger level, using eFex TOBs.
 | HHbbyy | Signal | HH → bbyy, μ=200 |
 | Zee | Signal | Z → ee, μ=200 |
 | Hyy | Signal | H → yy |
-| JZ0 | Background | QCD dijets, pT slice 0 |
-| JZ1 | Background | QCD dijets, pT slice 1 |
-| JZ2 | Background | QCD dijets, pT slice 2 |
+| JZ0 | Background | QCD dijets, pT slice 0 (max pT 20 GeV) |
+| JZ1 | Background | QCD dijets, pT slice 1 (max pT 60 GeV) |
+| JZ2 | Background | QCD dijets, pT slice 2 (max pT 160 GeV) |
 
 Input rates: JZ0 = 30.92 MHz, JZ1 = 30.91 MHz, JZ2 = 1.84 MHz.
 
@@ -269,11 +301,23 @@ Input rates: JZ0 = 30.92 MHz, JZ1 = 30.91 MHz, JZ2 = 1.84 MHz.
 
 ### Pre-selections
 
+Pre-selection to TOBs
+- **|η| < 2.4** and outside crack region (1.37 < |η| < 1.52)
+- TOB matched to at least one tower (min 10 GeV) with ΔR < 0.1
+- TOB ET > min (scan: 10, 15, 20 GeV)
+- Loose shower shape cuts
+- ERatio selection (None, Tomas Optimal, or 95 Flat working point)
 - **|PPZ| < 3000 mm** applied to all TOBs before any trigger logic
-- **Min TOB ET** cut applied to all TOBs (scan: 10, 15, 20 GeV)
-- **ERatio** shower shape cut (None or Tomas Optimal working point)
-- Signal samples require truth-matched leading and subleading photon TOBs
+    - To remove outliers
+
+Events must have at least one surviving TOB after pre-selections
+
+Signal Truth Matching
+
+- Signal samples require truth-matched leading and subleading photon TOBs (exactly 2 matched)
+    - [photon matching algorithm]
 - Subleading truth photon pT > 15 GeV (applied at ntuple production)
+
 
 ---
 
@@ -337,6 +381,203 @@ Endcap TOBs always pass. Working points:
 
 ---
 """)
+    st.stop()
+
+# ── Cutflow page ──────────────────────────────────────────────────────────────
+
+if page == "Cutflow":
+    import pandas as pd
+
+    if not yields_bkg or not yields_sig:
+        st.warning("yields not found in pkl — regenerate with updated trigger_rate.py.")
+        st.stop()
+    has_tob          = any("n_tob"         in v for v in yields_bkg.values())
+    has_eta          = any("n_eta"         in v for v in yields_bkg.values())
+    has_tower_match  = any("n_tower_match" in v for v in yields_bkg.values())
+
+    eratio_label = ERATIO_LABELS.get(cf_eratio_sel, str(cf_eratio_sel))
+    st.header(f"Cutflow — {TRG_LABELS.get(cf_trg_sel)}  |  {ALG_LABELS.get(cf_alg_sel, cf_alg_sel)}  |  ET > {cf_et_sel} GeV")
+
+    # find threshold index at rate budget
+    rate_curve = results[cf_eratio_sel][cf_et_sel][cf_alg_sel][cf_trg_sel]["rate"]
+    t_idx = int(np.argmin(np.abs(rate_curve - cf_rate_budget * 1e3)))
+
+    # steps: (label, eratio_key, threshold_idx)
+    # threshold_idx == None → Raw, "eta" → η mask, -1 → pre-PPZ, int → PPZ scan point
+    tob_step         = [("≥1 TOB",         None, "tob")]          if has_tob         else []
+    eta_step         = [("After η mask",   None, "eta")]          if has_eta         else []
+    tower_match_step = [("Tower match",    None, "tower_match")]  if has_tower_match else []
+    if cf_eratio_sel is None:
+        steps = (
+            [("Raw", None, None)]
+            + tob_step
+            + eta_step
+            + tower_match_step
+            + [
+                (f"Min ET > {cf_et_sel} GeV",               None, -1),
+                (f"PPZ trigger ({cf_rate_budget:.0f} kHz)",  None, t_idx),
+            ]
+        )
+    else:
+        steps = (
+            [("Raw", None, None)]
+            + tob_step
+            + eta_step
+            + tower_match_step
+            + [
+                (f"Min ET > {cf_et_sel} GeV",               None,          -1),
+                (f"+ {eratio_label}",                        cf_eratio_sel, -1),
+                (f"PPZ trigger ({cf_rate_budget:.0f} kHz)",  cf_eratio_sel, t_idx),
+            ]
+        )
+
+    step_labels = [s[0] for s in steps]
+
+    # ── Compute background values ─────────────────────────────────────────────
+    def bkg_rate_at(eratio, tidx, jz):
+        n_raw = yields_bkg[jz]["n_raw"]
+        if tidx is None:
+            return JZ_INPUT_RATE[jz] / 1e3
+        if tidx in ("tob", "eta", "tower_match"):
+            key = {"tob": "n_tob", "eta": "n_eta", "tower_match": "n_tower_match"}[tidx]
+            n = yields_bkg[jz].get(key, n_raw)
+            return JZ_INPUT_RATE[jz] / 1e3 * (n / n_raw) if n_raw > 0 else 0.0
+        return results[eratio][cf_et_sel][cf_alg_sel][cf_trg_sel]["rate_per_slice"][jz][tidx] / 1e3
+
+    def bkg_n_at(eratio, tidx, jz):
+        n_raw = yields_bkg[jz]["n_raw"]
+        if tidx is None:
+            return n_raw
+        if tidx in ("tob", "eta", "tower_match"):
+            key = {"tob": "n_tob", "eta": "n_eta", "tower_match": "n_tower_match"}[tidx]
+            return yields_bkg[jz].get(key, n_raw)
+        return int(bkg_rate_at(eratio, tidx, jz) * 1e3 / JZ_INPUT_RATE[jz] * n_raw)
+
+    bkg_data = {jz: [{"label": lbl, "n": bkg_n_at(era, ti, jz), "rate": bkg_rate_at(era, ti, jz)}
+                      for lbl, era, ti in steps] for jz in jz_options}
+    bkg_total = [{"label": lbl,
+                  "n":    sum(bkg_n_at(era, ti, jz) for jz in jz_options),
+                  "rate": (TOTAL_INPUT_RATE / 1e3 if ti is None else
+                           sum(bkg_rate_at(era, ti, jz) for jz in jz_options) if ti in ("tob", "eta", "tower_match") else
+                           results[era][cf_et_sel][cf_alg_sel][cf_trg_sel]["rate"][ti] / 1e3)}
+                 for lbl, era, ti in steps]
+
+    # ── Compute signal values ─────────────────────────────────────────────────
+    def sig_eff_at(eratio, tidx, sig):
+        n_raw = yields_sig[sig]["n_raw"]
+        if tidx is None:
+            return 1.0
+        if tidx in ("tob", "eta", "tower_match"):
+            key = {"tob": "n_tob", "eta": "n_eta", "tower_match": "n_tower_match"}[tidx]
+            n = yields_sig[sig].get(key, n_raw)
+            return n / n_raw if n_raw > 0 else 1.0
+        return float(results[eratio][cf_et_sel][cf_alg_sel][cf_trg_sel]["efficiency"][sig][tidx])
+
+    sig_data = {sig: [{"label": lbl, "eff": sig_eff_at(era, ti, sig),
+                        "n": int(sig_eff_at(era, ti, sig) * yields_sig[sig]["n_raw"])}
+                       for lbl, era, ti in steps]
+                for sig in sig_options if sig in yields_sig}
+
+    # ── Tabs ─────────────────────────────────────────────────────────────────
+    tab1, tab2 = st.tabs(["Table", "Waterfall"])
+
+    # ── Tab 1: Table ─────────────────────────────────────────────────────────
+    with tab1:
+        st.subheader("Background")
+        bkg_cols = {("", "Cut"): [lbl for lbl, _, _ in steps]}
+        for jz in jz_options:
+            bkg_cols[(jz, "N")]         = []
+            bkg_cols[(jz, "ε (%)")]     = []
+            bkg_cols[(jz, "Rate (kHz)")] = []
+        bkg_cols[("Total", "N")]            = []
+        bkg_cols[("Total", "Rate (kHz)")]  = []
+        bkg_cols[("Total", "Rejection")]   = []
+        for i in range(len(steps)):
+            for jz in jz_options:
+                n  = bkg_data[jz][i]["n"]
+                n0 = bkg_data[jz][0]["n"]
+                bkg_cols[(jz, "N")].append(f"{n:,}")
+                bkg_cols[(jz, "ε (%)")].append(f"{100*n/n0:.1f}" if n0 > 0 else "—")
+                bkg_cols[(jz, "Rate (kHz)")].append(f"{bkg_data[jz][i]['rate']:.1f}")
+            bkg_cols[("Total", "N")].append(f"{bkg_total[i]['n']:,}")
+            bkg_cols[("Total", "Rate (kHz)")].append(f"{bkg_total[i]['rate']:.1f}")
+            if i == 0 or bkg_total[i]["rate"] == 0:
+                bkg_cols[("Total", "Rejection")].append("—")
+            else:
+                bkg_cols[("Total", "Rejection")].append(f"÷{bkg_total[i-1]['rate'] / bkg_total[i]['rate']:.1f}")
+        bkg_df = pd.DataFrame(bkg_cols)
+        bkg_df.columns = pd.MultiIndex.from_tuples(bkg_df.columns)
+        st.dataframe(bkg_df, hide_index=True, use_container_width=True)
+
+        st.subheader("Signal")
+        sig_cols = {("", "Cut"): [lbl for lbl, _, _ in steps]}
+        for sig in sig_data:
+            sig_cols[(sig, "N")]     = []
+            sig_cols[(sig, "ε (%)")]  = []
+        for i in range(len(steps)):
+            for sig, sdata in sig_data.items():
+                n0 = sdata[0]["n"]
+                sig_cols[(sig, "N")].append(f"{sdata[i]['n']:,}")
+                sig_cols[(sig, "ε (%)")].append(f"{100*sdata[i]['eff']:.1f}")
+        sig_df = pd.DataFrame(sig_cols)
+        sig_df.columns = pd.MultiIndex.from_tuples(sig_df.columns)
+        st.dataframe(sig_df, hide_index=True, use_container_width=True)
+
+    # ── Tab 2: Waterfall ─────────────────────────────────────────────────────
+    with tab2:
+        col1, col2 = st.columns(2)
+        with col1:
+            st.subheader("Background — rate by JZ slice (kHz)")
+            fig = go.Figure()
+            for jz in jz_options:
+                fig.add_trace(go.Bar(
+                    name=jz,
+                    x=step_labels,
+                    y=[d["rate"] for d in bkg_data[jz]],
+                    marker_color=JZ_COLORS.get(jz),
+                    text=[f"{d['rate']:.0f}" for d in bkg_data[jz]],
+                    textposition="inside",
+                ))
+            # overlay total rate as a line
+            fig.add_trace(go.Scatter(
+                x=step_labels,
+                y=[d["rate"] for d in bkg_total],
+                mode="lines+markers+text",
+                name="Total",
+                line=dict(color="white", width=2, dash="dot"),
+                marker=dict(size=7),
+                text=[f"{d['rate']:.0f} kHz" for d in bkg_total],
+                textposition="top center",
+                textfont=dict(size=11),
+            ))
+            fig.update_layout(
+                barmode="stack", height=420,
+                yaxis_title="Rate (kHz)", yaxis_type="log",
+                margin=dict(l=0, r=0, t=10, b=0),
+                legend=dict(orientation="h", y=1.05),
+            )
+            st.plotly_chart(fig, use_container_width=True)
+        with col2:
+            st.subheader("Signal — efficiency (%)")
+            fig = go.Figure()
+            for sig, sdata in sig_data.items():
+                fig.add_trace(go.Bar(
+                    name=sig,
+                    x=step_labels,
+                    y=[d["eff"] * 100 for d in sdata],
+                    marker_color=SIG_COLORS.get(sig),
+                    text=[f"{d['eff']*100:.1f}%" for d in sdata],
+                    textposition="inside",
+                ))
+            fig.update_layout(
+                barmode="group", height=420,
+                yaxis_title="Efficiency (%)", yaxis_range=[0, 105],
+                margin=dict(l=0, r=0, t=10, b=0),
+                legend=dict(orientation="h", y=1.05),
+            )
+            st.plotly_chart(fig, use_container_width=True)
+
+
     st.stop()
 
 # ── Plot ──────────────────────────────────────────────────────────────────────
@@ -472,6 +713,28 @@ else:
             fig.add_vline(x=rate_budget,        line=dict(color="red",    dash="dash", width=1.5), annotation_text=f"{rate_budget:.0f} kHz")
         if rate_budget_single is not None:
             fig.add_vline(x=rate_budget_single, line=dict(color="orange", dash="dash", width=1.5), annotation_text=f"{rate_budget_single:.0f} kHz")
+        if show_baselines:
+            eratio_label = ERATIO_LABELS.get(eratio_sel, str(eratio_sel))
+            baselines = [
+                (eratio_sel, et_sel, "single_egamma", f"{eratio_label}, ≥1 TOB",  "rgba(160,160,160,0.8)", 0.97),
+                (eratio_sel, et_sel, "di_egamma",     f"{eratio_label}, ≥2 TOBs", "rgba(160,160,160,0.8)", 0.89),
+            ]
+            for eratio_bl, et_bl, trg_bl, label_bl, color_bl, ann_y in baselines:
+                try:
+                    ref = results[eratio_bl][et_bl][alg_sel][trg_bl]["rate"][-1] / 1e3
+                    fig.add_vline(
+                        x=ref,
+                        line=dict(color=color_bl, dash="dot", width=1.5),
+                        annotation=dict(
+                            text=f"{label_bl} ({ref:.0f} kHz)",
+                            font=dict(size=10, color="rgba(160,160,160,0.9)"),
+                            y=ann_y, yref="paper",
+                            yanchor="middle",
+                            xanchor="left",
+                        ),
+                    )
+                except KeyError:
+                    pass
         xaxis = dict(title="Trigger rate [kHz]", type="log" if log_x else "linear")
         yaxis = dict(title="Signal efficiency", range=[0, 1])
         title = f"{sig_sel}   |   {title}"
@@ -566,6 +829,24 @@ else:
                 line=dict(color=TRG_COLORS.get(trg), width=2),
                 hovertemplate="Threshold: %{x:.0f} mm<br>Rate: %{y:.2f} kHz<extra></extra>",
             ))
+        if show_baselines:
+            eratio_label = ERATIO_LABELS.get(eratio_sel, str(eratio_sel))
+            baselines = [
+                (eratio_sel, et_sel, "single_egamma", f"{eratio_label}, ≥1 TOB",  "rgba(160,160,160,0.8)", 0.97),
+                (eratio_sel, et_sel, "di_egamma",     f"{eratio_label}, ≥2 TOBs", "rgba(160,160,160,0.8)", 0.89),
+            ]
+            for eratio_bl, et_bl, trg_bl, label_bl, color_bl, ann_x in baselines:
+                try:
+                    ref = results[eratio_bl][et_bl][alg_sel][trg_bl]["rate"][-1] / 1e3
+                    fig.add_hline(
+                        y=ref,
+                        line=dict(color=color_bl, dash="dot", width=1.5),
+                        annotation_text=f"{label_bl} ({ref:.0f} kHz)",
+                        annotation_font_size=10,
+                        annotation_position="right",
+                    )
+                except KeyError:
+                    pass
         xaxis = dict(title="PPZ threshold [mm]")
         yaxis = dict(title="Trigger rate [kHz]", type="log" if log_y else "linear")
 
